@@ -6,8 +6,12 @@ from sqlmodel import SQLModel, Field, Session, create_engine, select
 from app.utils.logging import setup_logging
 from app.services.llm import LLMService
 from dotenv import load_dotenv
+from uvicorn import Config, Server
 import logging
 import os
+import uvicorn
+import socketio
+import asyncio
 
 load_dotenv()
 
@@ -38,8 +42,36 @@ class Prompt(SQLModel, table=True):
     prompt_name: str
     prompt: str
 
+# Create Socket.IO server
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+
 # Initialize FastAPI app
 app = FastAPI()
+
+# Create ASGI app by wrapping Socket.IO
+socket_app = socketio.ASGIApp(sio, app)
+
+# Socket.IO event handlers
+@sio.event
+async def connect(sid, environ):
+    logger.info(f"Client connected: {sid}")
+
+@sio.event
+async def disconnect(sid):
+    logger.info(f"Client disconnected: {sid}")
+
+@sio.event
+async def chat_message(sid, data):
+    logger.info(f"Received data from {sid}: {data}")
+    llm_service = LLMService()
+
+    # Process the received data
+    response = await llm_service.prompt(data, system_prompt="You are a comedian.")
+
+    # Emit response back to client
+    await sio.emit('response_event', {'response': response})
+
+    logger.info(f"Sent response to {sid}: {response}")
 
 # Create tables on startup
 @app.on_event("startup")
@@ -121,6 +153,16 @@ async def health_check():
     logger.info("Health check")
     return {"status": "healthy"}
 
+# Custom uvicorn server setup to handle both HTTP and WebSocket
+def run_server():
+    config = Config(
+        app=socket_app,
+        host="0.0.0.0",
+        port=8000,
+        loop="asyncio"
+    )
+    server = Server(config)
+    asyncio.run(server.serve())
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    run_server()
